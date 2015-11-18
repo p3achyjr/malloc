@@ -4,7 +4,7 @@
 CC = gcc
 CFLAGS = -Wall -Wextra -Werror -O3 -g -DDRIVER -std=gnu99 -Wno-unused-function -Wno-unused-parameter
 
-OBJS = mdriver.o mm.o memlib.o fsecs.o fcyc.o clock.o ftimer.o 
+OBJS = mdriver.o mm.o memlib.o fsecs.o fcyc.o clock.o ftimer.o
 
 all: mdriver
 

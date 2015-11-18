@@ -66,7 +66,7 @@ static void *coalesce(void *bp);
 /* 
  * mm_init - Initialize the memory manager 
  */
-int mm_init(void) 
+int mm_init(void)
 {
     /* Create the initial empty heap */
     if ((heap_listp = mem_sbrk(4*WSIZE)) == (void *)-1) 
