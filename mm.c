@@ -37,7 +37,7 @@
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(p) (((size_t)(p) + (ALIGNMENT-1)) & ~0x7)
 
-//#define checkheap(lineno) mm_checkheap(lineno)
+// #define checkheap(lineno) mm_checkheap(lineno)
 #define checkheap(lineno) 
 
 /*
@@ -138,8 +138,8 @@ void *malloc (size_t size) {
     return NULL;
 
   /* Adjust block size to include overhead and alignment reqs. */
-  if (size <= DSIZE)                                       
-    asize = 2*DSIZE;                                       
+  if (size <= 2*DSIZE)                                      
+    asize = MINSIZE;                                     
   else
     asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
 
@@ -686,7 +686,7 @@ void mm_checkheap(int lineno) {
   if (free_blks != free_list_blks) 
     printf("Error: free_blks (%d) and free_list_blks (%d) do not match (%d)\n",
            free_blks, free_list_blks, lineno);
-  printf("ALL CLEAR\n");
+  // printf("ALL CLEAR\n");
 }
 
 
