@@ -342,6 +342,7 @@ static void *coalesce(void *bp)
     // update prev_alloc state of next block
     next = NEXT_BLKP(NEXT_BLKP(bp));
     PUT(HDRP(next), PACK(GET_SIZE(HDRP(next)), GET_ALLOC(HDRP(next)), 0));
+    PUT(FTRP(next), PACK(GET_SIZE(HDRP(next)), GET_ALLOC(HDRP(next)), 0));
   }
 
   else if (!prev_alloc && next_alloc) {      /* Case 3 */
@@ -407,6 +408,7 @@ static void *coalesce(void *bp)
     // update prev_alloc state of next block
     next = NEXT_BLKP(NEXT_BLKP(bp));
     PUT(HDRP(next), PACK(GET_SIZE(HDRP(next)), GET_ALLOC(HDRP(next)), 0));
+    PUT(FTRP(next), PACK(GET_SIZE(HDRP(next)), GET_ALLOC(HDRP(next)), 0));
 
     // get first block (we do it here to avoid nasty edge cases)
     first_blk = GETPTR(heap_listp);
