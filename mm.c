@@ -37,7 +37,7 @@
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(p) (((size_t)(p) + (ALIGNMENT-1)) & ~0x7)
 
-// #define checkheap(lineno) mm_checkheap(lineno)
+//#define checkheap(lineno) mm_checkheap(lineno)
 #define checkheap(lineno) 
 
 /*
@@ -82,8 +82,9 @@
 #define PREV_BLKP(bp)  ((char *)(bp) - GET_SIZE(((char *)(bp) - DSIZE)))
 
 /* Global variables */
-static char *heap_listp = 0;  /* Pointer to first block */
-static char *heap_start = 0;  /* start of heap, where there is nothing */
+static char *heap_listp = 0;    /* Pointer to first block */
+static char *heap_start = 0;    /* Start of heap, where there is nothing */
+static char *bin_end = 0; /* End of prologue block */
 // #ifdef NEXT_FIT
 // static char *rover;           /* Next fit rover */
 // #endif
@@ -98,13 +99,16 @@ static void *coalesce(void *bp);
  * set up the header section
  */
 void prologue_init(void) {
+  unsigned int hdrSize = 30*WSIZE;
   PUT(heap_listp, 0);                          /* Alignment padding */
-  PUT(heap_listp + (1*WSIZE), PACK(MINSIZE, 1)); /* Prologue header */
-  // pointer to next(epilogue) block
-  PUTPTR(heap_listp + (2*WSIZE), (unsigned long)END);
-  // pointer to prev block
-  PUTPTR(heap_listp + (3*WSIZE), (unsigned long)END);
-  PUT(heap_listp + (4*WSIZE), PACK(MINSIZE, 1)); /* Prologue footer */
+  PUT(heap_listp + (1*WSIZE), PACK(hdrSize, 1)); /* Prologue header */
+  for (int i = 2; i < 29; i+=2) {
+    // pointer to next(epilogue) block
+    PUTPTR(heap_listp + (i*WSIZE), (unsigned long)END);
+    // pointer to prev block
+    PUTPTR(heap_listp + ((i+1)*WSIZE), (unsigned long)END);
+  }
+  PUT(heap_listp + (30*WSIZE), PACK(hdrSize, 1)); /* Prologue footer */
 }
 
 /*
@@ -112,13 +116,14 @@ void prologue_init(void) {
  */
 int mm_init(void) {
   /* Create the initial empty heap */
-  if ((heap_listp = mem_sbrk(6*WSIZE)) == (void *)-1) 
+  if ((heap_listp = mem_sbrk(32*WSIZE)) == (void *)-1) 
       return -1;
 
   heap_start = heap_listp;
   prologue_init();
-  PUT(heap_listp + (5*WSIZE), PACK(0, 1)); // size 0 to signify end 
-  heap_listp += (2*WSIZE);       
+  PUT(heap_listp + (31*WSIZE), PACK(0, 1)); // size 0 to signify end
+  bin_end = heap_listp + (30*WSIZE);
+  heap_listp += (2*WSIZE);
 
 // #ifdef NEXT_FIT
 //   rover = heap_listp;
@@ -266,116 +271,66 @@ static void *extend_heap(size_t words)
 }
 
 /*
+ * getBin - get pointer to proper size list
+ */
+static inline char *getBin(size_t size) {
+  if (size < 64) {
+    // list for every size
+    return (heap_listp + (size - 2*DSIZE));
+  } else if (size >= 8192) {
+    // one list for blocks of size >= 8192
+    // 14 bins, so last one is at DSIZE*13
+    return (heap_listp + (DSIZE*13));
+  }
+
+  // powers of 2
+  int offset = 0;
+  while (size >>= 1) offset ++;
+  return (heap_listp + (DSIZE*offset));
+}
+
+static void coalesceNext(void *bp) {
+  next = NEXT_BLKP(bp);
+  size += GET_SIZE(HDRP(next));
+  bin = getBin(size);
+  PUT(HDRP(bp), PACK(size, 0));
+  PUT(FTRP(bp), PACK(size, 0));
+
+  // if next is not epilogue, get next and prev
+  if (next != NULL && (unsigned long)HDRP(next) != 1) {
+    next_next = GETPTR(next);
+    next_prev = GETPTR(next + WSIZE);
+  }
+
+  // reset pointers
+  if (next_next != END) {
+    PUTPTR(next_next + WSIZE, next_prev);
+  }
+  if (next_prev != END) {
+    PUTPTR(next_prev, next_next);
+  }
+
+  // get first block (we do it here to avoid nasty edge cases)
+  first_blk = GETPTR(bin);
+
+  // insert bp into root of list
+  PUTPTR(bp, first_blk);
+  PUTPTR(bp + WSIZE, bin);
+  PUTPTR(bin, bp);
+  if (first_blk != END) {
+    PUTPTR(first_blk + WSIZE, bp);
+  }
+}
+
+/*
  * coalesce - Boundary tag coalescing. Return ptr to coalesced block
  */
-// static void *coalesce(void *bp) 
-// {
-//   char *prev_blk = PREV_BLKP(bp);
-//   char *next_blk = NEXT_BLKP(bp);
-//   char *next_blk_next = NULL;
-//   char *next_blk_prev = NULL;
-//   char *prev_blk_next = NULL;
-//   char *prev_blk_prev = NULL;
-//   size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
-//   size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
-//   size_t size = GET_SIZE(HDRP(bp));
-
-//   bp = (char *)bp;
-//   char *first_blk = GETPTR(heap_listp);
-
-//   if (prev_alloc && next_alloc) {            /* Case 1 */
-//     // bp next is old first
-//     PUTPTR(bp, first_blk);
-//     // bp prev is start of list
-//     PUTPTR(bp + DSIZE, heap_listp);
-//     // first block is now bp
-//     PUTPTR(heap_listp, bp);
-//     // first block prev is bp
-//     if (first_blk != NULL)
-//       PUTPTR(first_blk + DSIZE, bp);
-//     return bp;
-//   }
-
-//   if (next_blk != NULL && next_blk != mem_heap_hi() + 1) {
-//     next_blk_next = (char *)GETPTR(next_blk);
-//     next_blk_prev = (char *)GETPTR(next_blk + DSIZE);
-//   }
-
-//   if (prev_blk != NULL) {
-//     prev_blk_next = (char *)GETPTR(prev_blk);
-//     prev_blk_prev = (char *)GETPTR(prev_blk + DSIZE);
-//   }
-
-//   if (prev_alloc && !next_alloc) {      /* Case 2 */
-//     size += GET_SIZE(HDRP(NEXT_BLKP(bp)));
-//     PUT(HDRP(bp), PACK(size, 0));
-//     PUT(FTRP(bp), PACK(size, 0));
-//     // change pointers on old free block, if prev/next are not null
-//     if (next_blk != NULL && next_blk != mem_heap_hi() + 1 
-//         && next_blk_prev != NULL)
-//       PUTPTR(next_blk_prev, next_blk_next);
-//     if (next_blk != NULL && next_blk != mem_heap_hi() + 1 
-//         && next_blk_next != NULL)
-//       PUTPTR(next_blk_next + DSIZE, next_blk_prev);
-//   }
-
-//   else if (!prev_alloc && next_alloc) {      /* Case 3 */
-//     size += GET_SIZE(HDRP(PREV_BLKP(bp)));
-//     PUT(FTRP(bp), PACK(size, 0));
-//     PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-//     // change pointers of old free block
-//     if (prev_blk != NULL && prev_blk_prev != NULL)
-//       PUTPTR(prev_blk_prev, prev_blk_next);
-//     if (prev_blk != NULL && prev_blk_next != NULL)
-//       PUTPTR(prev_blk_next + DSIZE, prev_blk_prev);
-//     bp = PREV_BLKP(bp);
-//   }
-
-//   else {                                     /* Case 4 */
-//     size += GET_SIZE(HDRP(PREV_BLKP(bp))) + 
-//         GET_SIZE(FTRP(NEXT_BLKP(bp)));
-//     PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
-//     PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
-//     // change pointers of old free blocks
-//     if (next_blk != NULL && next_blk != mem_heap_hi() + 1
-//         && next_blk_prev != NULL)
-//       PUTPTR(next_blk_prev, next_blk_next);
-//     if (next_blk != NULL && next_blk != mem_heap_hi() + 1
-//         && next_blk_prev != NULL)
-//       PUTPTR(next_blk_next + DSIZE, next_blk_prev);
-//     if (prev_blk != NULL && prev_blk_prev != NULL)
-//       PUTPTR(prev_blk_prev, prev_blk_next);
-//     if (prev_blk != NULL && prev_blk_next != NULL)
-//       PUTPTR(prev_blk_next + DSIZE, prev_blk_prev);
-//     bp = PREV_BLKP(bp);
-//   }
-
-//   // bp next is old first
-//   if (bp != first_blk) { // if bp is first blk, then next should remain same
-//     PUTPTR(bp, first_blk);
-//     // first block prev is bp. If first block is current, prev is the same
-//     if (first_blk != NULL)
-//       PUTPTR(first_blk + DSIZE, bp);
-//   }
-//   // bp prev is start of list
-//   PUTPTR(bp + DSIZE, heap_listp);
-//   // first block is now bp
-//   PUTPTR(heap_listp, bp);
-
-// // #ifdef NEXT_FIT
-//   /* Make sure the rover isn't pointing into the free block */
-//   /* that we just coalesced */
-// //     if ((rover > (char *)bp) && (rover < NEXT_BLKP(bp))) 
-// //         rover = bp;
-// // #endif
-//   checkheap(__LINE__);
-//   return bp;
-// }
-
 static void *coalesce(void *bp) 
 {
   char *next;
   char *first_blk;
+  char *bin;
+  char *prev_bin;
   char *next_next = NULL;
   char *next_prev = NULL;
   char *prev_next = NULL;
@@ -387,21 +342,23 @@ static void *coalesce(void *bp)
   bp = (char *)bp;
 
   if (prev_alloc && next_alloc) {            /* Case 1 */
-    first_blk = GETPTR(heap_listp);
+    bin = getBin(size);
+    first_blk = GETPTR(bin);
     PUTPTR(bp, first_blk); // next is first block
-    PUTPTR(bp + WSIZE, heap_listp); // prev is start of list
+    PUTPTR(bp + WSIZE, bin); // prev is start of list
     if (first_blk != END) {
       PUTPTR(first_blk + WSIZE, bp); // first_blk prev is bp
     }
-    PUTPTR(heap_listp, bp); // heap_listp next is bp
+    PUTPTR(bin, bp); // heap_listp next is bp
     return bp;
   }
 
   else if (prev_alloc && !next_alloc) {      /* Case 2 */
     next = NEXT_BLKP(bp);
     size += GET_SIZE(HDRP(next));
+    bin = getBin(size);
     PUT(HDRP(bp), PACK(size, 0));
-    PUT(FTRP(bp), PACK(size,0));
+    PUT(FTRP(bp), PACK(size, 0));
 
     // if next is not epilogue, get next and prev
     if (next != NULL && (unsigned long)HDRP(next) != 1) {
@@ -418,12 +375,12 @@ static void *coalesce(void *bp)
     }
 
     // get first block (we do it here to avoid nasty edge cases)
-    first_blk = GETPTR(heap_listp);
+    first_blk = GETPTR(bin);
 
     // insert bp into root of list
     PUTPTR(bp, first_blk);
-    PUTPTR(bp + WSIZE, heap_listp);
-    PUTPTR(heap_listp, bp);
+    PUTPTR(bp + WSIZE, bin);
+    PUTPTR(bin, bp);
     if (first_blk != END) {
       PUTPTR(first_blk + WSIZE, bp);
     }
@@ -431,13 +388,16 @@ static void *coalesce(void *bp)
 
   else if (!prev_alloc && next_alloc) {      /* Case 3 */
     size += GET_SIZE(HDRP(PREV_BLKP(bp)));
+    bin = getBin(size);
+    prev_bin = getBin(GET_SIZE(HDRP(PREV_BLKP(bp))));
     PUT(FTRP(bp), PACK(size, 0));
     PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
     bp = PREV_BLKP(bp);
 
-    first_blk = GETPTR(heap_listp);
-    // if bp == first_blk, bp is already in the list
-    if ((unsigned long)first_blk == (unsigned long)bp) return bp;
+    first_blk = GETPTR(bin);
+    // if bp == first_blk and bp is the proper size, return bp
+    if (((unsigned long)first_blk == (unsigned long)bp) && prev_bin == bin) 
+      return bp;
 
     // get next and prev for bp, which is the original prev block
     prev_prev = GETPTR(bp + WSIZE);
@@ -451,10 +411,10 @@ static void *coalesce(void *bp)
       PUTPTR(prev_next + WSIZE, prev_prev);
     }
 
-    // insert bp into root of list
+    // insert bp into root of bin
     PUTPTR(bp, first_blk);
-    PUTPTR(bp + WSIZE, heap_listp);
-    PUTPTR(heap_listp, bp);
+    PUTPTR(bp + WSIZE, bin);
+    PUTPTR(bin, bp);
     if (first_blk != END) {
       PUTPTR(first_blk + WSIZE, bp);
     }
@@ -464,6 +424,8 @@ static void *coalesce(void *bp)
     next = NEXT_BLKP(bp);
     size += GET_SIZE(HDRP(PREV_BLKP(bp))) + 
         GET_SIZE(FTRP(next));
+    bin = getBin(size);
+    prev_bin = getBin(GET_SIZE(HDRP(PREV_BLKP(bp))));
     PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
     PUT(FTRP(NEXT_BLKP(bp)), PACK(size, 0));
     bp = PREV_BLKP(bp);
@@ -483,8 +445,9 @@ static void *coalesce(void *bp)
     }
 
     // get first block (we do it here to avoid nasty edge cases)
-    first_blk = GETPTR(heap_listp);
-    if ((unsigned long)first_blk == (unsigned long)bp) return bp;
+    first_blk = GETPTR(bin);
+    if (((unsigned long)first_blk == (unsigned long)bp) && prev_bin == bin) 
+      return bp;
 
     // get next and prev for bp, which is the original prev block
     prev_prev = GETPTR(bp + WSIZE);
@@ -500,14 +463,14 @@ static void *coalesce(void *bp)
 
     // insert bp into root of list
     PUTPTR(bp, first_blk);
-    PUTPTR(bp + WSIZE, heap_listp);
-    PUTPTR(heap_listp, bp);
+    PUTPTR(bp + WSIZE, bin);
+    PUTPTR(bin, bp);
     if (first_blk != END) {
       PUTPTR(first_blk + WSIZE, bp);
     }
   }
 
-  return bp;
+  return (void*)bp;
 }
 
 /* 
@@ -516,6 +479,8 @@ static void *coalesce(void *bp)
  */
 static void place(void *bp, size_t asize)
 {
+  char *bin;
+  char *first_blk;
   size_t csize = GET_SIZE(HDRP(bp));
   char *next = GETPTR(bp);
   char *prev = GETPTR((char *)bp + WSIZE);
@@ -529,15 +494,22 @@ static void place(void *bp, size_t asize)
     // new header and footer
     PUT(HDRP(bp), PACK(csize-asize, 0));
     PUT(FTRP(bp), PACK(csize-asize, 0));
-    // put the next and previous pointers in correct position
-    PUTPTR(bp, next);
-    PUTPTR((char*)bp + WSIZE, prev);
+    bin = getBin(csize - asize);
+
     // fix pointers of next and prev blocks
     if (prev != END) {
-      PUTPTR(prev, bp);
+      PUTPTR(prev, next);
     }
     if (next != END) {
-      PUTPTR(next + WSIZE, bp);
+      PUTPTR(next + WSIZE, prev);
+    }
+    // insert new free block into root of correct list
+    first_blk = GETPTR(bin);
+    PUTPTR(bp, first_blk);
+    PUTPTR((char*)bp + WSIZE, bin);
+    PUTPTR(bin, bp);
+    if (first_blk != END) {
+      PUTPTR(first_blk + WSIZE, bp);
     }
   }
   else {
@@ -550,7 +522,6 @@ static void place(void *bp, size_t asize)
       PUTPTR(next + WSIZE, prev);
     }
   }
-  checkheap(__LINE__);
 }
 
 /* 
@@ -560,14 +531,15 @@ static void *find_fit(size_t asize)
 {
   /* First-fit search */
   void *bp;
+  char *bin = getBin(asize);
 
-  for (bp = heap_listp; bp != END; bp = (void*)GETPTR(bp)) {
-    if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
-      checkheap(__LINE__);
-      return bp;
+  for (; bin != bin_end; bin += DSIZE) {
+    for (bp = bin; bp != END; bp = (void*)GETPTR(bp)) {
+      if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+        return bp;
+      }
     }
   }
-  checkheap(__LINE__);
   return NULL; /* No fit */
 // #endif
 }
@@ -588,30 +560,46 @@ static int aligned(const void *p) {
   return (size_t)ALIGN(p) == (size_t)p;
 }
 
-void check_prev_next(char *bp, int lineno) {
+int check_prev_next(char *bp, int lineno) {
   char *next = (char*)GETPTR(bp);
   char *prev = (char*)GETPTR(bp + WSIZE);
+  int error = 0;
 
   if (next != END && GET_ALLOC(HDRP(next))) {
     printf("Error, next block (%lx) not free (%d)\n", (unsigned long)next, 
            lineno);
-    if (!in_heap(next))
+    error = 1;
+  }
+  if (next != END) {
+    if (!in_heap(next)) {
       printf("Error: next block (%lx) not in heap (%d)\n", (unsigned long)next, 
            lineno);
-    if (GETPTR(next + WSIZE) != bp)
+      error = 1;
+    }
+    if (GETPTR(next + WSIZE) != bp) {
       printf("Error: next block (%lx) previous pointer is wrong (%d)\n", 
              (unsigned long)next, lineno);
+      error = 1;
+    }
   }
   if (prev != END && prev != heap_listp && GET_ALLOC(HDRP(prev))) {
     printf("Error, previous block (%lx) not free (%d)\n", 
            (unsigned long)prev, lineno);
-    if (!in_heap(prev))
+    error = 1;
+  }
+  if (prev != END && prev != heap_listp) {
+    if (!in_heap(prev)) {
       printf("Error: previous block (%lx) not in heap (%d)\n",
              (unsigned long)prev, lineno);
-    if (GETPTR(prev) != bp)
+      error = 1;
+    }
+    if (GETPTR(prev) != bp) {
       printf("Error: previous block (%lx) next pointer is wrong (%d)\n",
              (unsigned long)prev, lineno);
+      error = 1;
+    }
   }
+  return error;
 }
 
 /*
@@ -624,6 +612,7 @@ void mm_checkheap(int lineno) {
   int free_list_blks = 0;
   char *bp = heap_listp;
   int lastAlloc = 1;
+  int error = 0;
   // iterate through heap and check consistency
   for (; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
 
@@ -631,24 +620,29 @@ void mm_checkheap(int lineno) {
     if (!aligned(bp)) {
       printf("Error: block %lx is not aligned (%d)\n", 
              (unsigned long)bp, lineno);
+      error = 1;
     }
 
     // check in heap
     if (!in_heap(bp)) {
       printf("Error: block %lx is not aligned (%d)\n", 
              (unsigned long)bp, lineno);
+      error = 1;
     }
 
     // check header/footer consistency
-    if (!(GET(HDRP(bp)) == GET(FTRP(bp))))
+    if (!(GET(HDRP(bp)) == GET(FTRP(bp)))) {
       printf("Error: block %lx header/footer do not agree (%d)\n", 
              (unsigned long)bp, lineno);
+      error = 1;
+    }
 
     // check allocation state
     alloc = GET_ALLOC(HDRP(bp));
     if (!lastAlloc && !alloc) {
       printf("Error, two consecutive free blocks at addresses %lx, %lx (%d)\n",
              (unsigned long)PREV_BLKP(bp), (unsigned long)(bp), lineno);
+      error = 1;
     }
     lastAlloc = alloc;
 
@@ -659,27 +653,46 @@ void mm_checkheap(int lineno) {
   }
 
   // check free list
-  for (bp = heap_listp; bp != END; bp = (char*)GETPTR(bp)) {
-    // check consistency of prev/next pointers
-    check_prev_next(bp, lineno);
-    // check that current block is free
-    if (bp != heap_listp && GET_ALLOC(HDRP(bp))) {
-      printf("Error: block not free, but in free list (%lx) (%d)\n",
-             (unsigned long)bp, lineno);
+  char *currBin;
+  for (char *bin = getBin(16); bin != bin_end; bin += DSIZE) {
+    for (bp = bin; bp != END; bp = (char*)GETPTR(bp)) {
+      // check consistency of prev/next pointers
+      if (check_prev_next(bp, lineno))
+        error = 1;
+      // check that current block is free
+      if (bp != heap_listp && GET_ALLOC(HDRP(bp))) {
+        printf("Error: block not free, but in free list (%lx) (%d)\n",
+               (unsigned long)bp, lineno);
+        error = 1;
+      }
+
+      if (bp != bin) {
+        currBin = getBin(GET_SIZE(HDRP(bp)));
+        if (currBin != bin) {
+          printf("Error: block (%lx) not in correct bin (%d)\n",
+                 (unsigned long)bp, lineno);
+          error = 1;
+        }
+      }
+
+      if (!in_heap(bp)) {
+        printf("Error: free block not in heap (%lx) (%d)\n",
+               (unsigned long)bp, lineno);
+        error = 1;
+      }
+
+      if (bp != bin)
+        free_list_blks++;
     }
-
-    if (!in_heap(bp))
-      printf("Error: free block not in heap (%lx) (%d)\n",
-             (unsigned long)bp, lineno);
-
-    if (bp != heap_listp)
-      free_list_blks++;
   }
 
-  if (free_blks != free_list_blks) 
+  if (free_blks != free_list_blks) {
     printf("Error: free_blks (%d) and free_list_blks (%d) do not match (%d)\n",
            free_blks, free_list_blks, lineno);
-  // printf("ALL CLEAR\n");
+    error = 1;
+  }
+  if (!error)
+    printf("ALL CLEAR(%d)\n", lineno);
 }
 
 
