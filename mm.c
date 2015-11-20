@@ -49,7 +49,7 @@
 #define WSIZE       4       /* Word and header/footer size (bytes) */ 
 #define DSIZE       8       /* Double word size (bytes) */
 #define MINSIZE     16     /* Min block size: 8 for hdr/ftr, 16 for prev/next*/
-#define CHUNKSIZE  (1<<9)  /* Extend heap by this amount (bytes) */ 
+#define CHUNKSIZE  (1<<6)  /* Extend heap by this amount (bytes) */ 
 #define END         heap_start 
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
@@ -124,10 +124,6 @@ int mm_init(void) {
   PUT(heap_listp + (31*WSIZE), PACK(0, 1)); // size 0 to signify end
   bin_end = heap_listp + (30*WSIZE);
   heap_listp += (2*WSIZE);
-
-// #ifdef NEXT_FIT
-//   rover = heap_listp;
-// #endif
 
   /* Extend the empty heap with a free block of CHUNKSIZE bytes */
   if (extend_heap(CHUNKSIZE/WSIZE) == NULL) 
@@ -289,7 +285,15 @@ static inline char *getBin(size_t size) {
   return (heap_listp + (DSIZE*offset));
 }
 
-static void coalesceNext(void *bp) {
+/*
+ * coalesceNext - coalesce for case 2
+ */
+static inline void coalesceNext(void *bp, size_t size) {
+  char *next;
+  char *first_blk;
+  char *bin;
+  char *next_next = END;
+  char *next_prev = END;
   next = NEXT_BLKP(bp);
   size += GET_SIZE(HDRP(next));
   bin = getBin(size);
@@ -324,6 +328,8 @@ static void coalesceNext(void *bp) {
 
 /*
  * coalesce - Boundary tag coalescing. Return ptr to coalesced block
+ * I'm not entirely sure why the modularity of code is so poor, but I went
+ * with the 4 case model presented in the lecture slides.
  */
 static void *coalesce(void *bp) 
 {
@@ -331,10 +337,10 @@ static void *coalesce(void *bp)
   char *first_blk;
   char *bin;
   char *prev_bin;
-  char *next_next = NULL;
-  char *next_prev = NULL;
-  char *prev_next = NULL;
-  char *prev_prev = NULL;
+  char *next_next = END;
+  char *next_prev = END;
+  char *prev_next = END;
+  char *prev_prev = END;
   size_t prev_alloc = GET_ALLOC(FTRP(PREV_BLKP(bp)));
   size_t next_alloc = GET_ALLOC(HDRP(NEXT_BLKP(bp)));
   size_t size = GET_SIZE(HDRP(bp));
@@ -342,7 +348,9 @@ static void *coalesce(void *bp)
   bp = (char *)bp;
 
   if (prev_alloc && next_alloc) {            /* Case 1 */
+    // get bin to put block
     bin = getBin(size);
+    // get first block of bin
     first_blk = GETPTR(bin);
     PUTPTR(bp, first_blk); // next is first block
     PUTPTR(bp + WSIZE, bin); // prev is start of list
@@ -354,41 +362,13 @@ static void *coalesce(void *bp)
   }
 
   else if (prev_alloc && !next_alloc) {      /* Case 2 */
-    next = NEXT_BLKP(bp);
-    size += GET_SIZE(HDRP(next));
-    bin = getBin(size);
-    PUT(HDRP(bp), PACK(size, 0));
-    PUT(FTRP(bp), PACK(size, 0));
-
-    // if next is not epilogue, get next and prev
-    if (next != NULL && (unsigned long)HDRP(next) != 1) {
-      next_next = GETPTR(next);
-      next_prev = GETPTR(next + WSIZE);
-    }
-
-    // reset pointers
-    if (next_next != END) {
-      PUTPTR(next_next + WSIZE, next_prev);
-    }
-    if (next_prev != END) {
-      PUTPTR(next_prev, next_next);
-    }
-
-    // get first block (we do it here to avoid nasty edge cases)
-    first_blk = GETPTR(bin);
-
-    // insert bp into root of list
-    PUTPTR(bp, first_blk);
-    PUTPTR(bp + WSIZE, bin);
-    PUTPTR(bin, bp);
-    if (first_blk != END) {
-      PUTPTR(first_blk + WSIZE, bp);
-    }
+    coalesceNext(bp, size);
   }
 
   else if (!prev_alloc && next_alloc) {      /* Case 3 */
     size += GET_SIZE(HDRP(PREV_BLKP(bp)));
     bin = getBin(size);
+    // prev_bin is bin that previous block is currently in
     prev_bin = getBin(GET_SIZE(HDRP(PREV_BLKP(bp))));
     PUT(FTRP(bp), PACK(size, 0));
     PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
@@ -525,20 +505,36 @@ static void place(void *bp, size_t asize)
 }
 
 /* 
- * find_fit - Find a fit for a block with asize bytes 
+ * find_fit - Find a fit for a block with asize bytes
+ * Best fit find
  */
 static void *find_fit(size_t asize)
 {
   /* First-fit search */
   void *bp;
+  void *best_fit;
+  size_t currBlkSize;
+  size_t diff = 0x80000000; // largest possible difference in heap
   char *bin = getBin(asize);
 
   for (; bin != bin_end; bin += DSIZE) {
+    best_fit = bin;
     for (bp = bin; bp != END; bp = (void*)GETPTR(bp)) {
-      if (!GET_ALLOC(HDRP(bp)) && (asize <= GET_SIZE(HDRP(bp)))) {
+      currBlkSize = GET_SIZE(HDRP(bp));
+      if (!GET_ALLOC(HDRP(bp)) && (asize == currBlkSize)) {
+        // perfect fit
         return bp;
+      } else if (!GET_ALLOC(HDRP(bp)) && (asize < currBlkSize)) {
+        // if this is true, we have found a better fit
+        if (currBlkSize - asize < diff) {
+          diff = currBlkSize - asize;
+          best_fit = bp;
+        }
       }
     }
+    // only case in which best_fit == bin is if list is empty
+    if (best_fit != bin)
+      return best_fit;
   }
   return NULL; /* No fit */
 // #endif
