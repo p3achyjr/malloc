@@ -1,8 +1,40 @@
 /*
  * mm.c
+ * 
+ * Anatol Liu, axl
+ * 15-213 F15
+ * 
+ * This is a memory allocator based on segregated lists
  *
- * NOTE TO STUDENTS: Replace this header comment with your own header
- * comment that gives a high level description of your solution.
+ * Each list (bin) is a doubly linked list, with the dummy node corresponding
+ * to heap_start
+ *
+ * For block sizes smaller than 64, there are single bins for each list
+ * For block sizes greater than or equal to 64, there are bins for each 
+ * power of 2, up to 8192. Any block with size greater than 8192 goes into 
+ * one list.
+ * 
+ * On a call to malloc, size is adjusted to account for padding and overhead.
+ * This is done by rounding up to the nearest multiple of 8 and adding an
+ * additional 8 bytes for header/footer. find_fit is called on the adjusted 
+ * size (asize). find_fit is a best-fit search that works as follows:
+ *   - Scan each bin starting from the correct bin for a block of at least
+ *     asize bytes
+ *   - if we find a perfect fit, return immediately
+ *   - Otherwise, return the best fit in the first non-empty bin.
+ * 
+ * place is then called on the best-fit block. This decides whether to split,
+ * or simply to return. When we split, we remove the current block from its
+ * corresponding bin, and place the new free block in its corresponding bin.
+ *
+ * 
+ * On a call to free, we reset the header and footer, then call coalesce
+ * Coalesce inserts the new free block into the root of the corresponding 
+ * bin.
+ *
+ * Coalesce is called immedately and not deferred
+ *
+ * 
  */
 #include <assert.h>
 #include <stdio.h>
@@ -37,7 +69,7 @@
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(p) (((size_t)(p) + (ALIGNMENT-1)) & ~0x7)
 
-//#define checkheap(lineno) mm_checkheap(lineno)
+// #define checkheap(lineno) mm_checkheap(lineno)
 #define checkheap(lineno) 
 
 /*
@@ -49,7 +81,7 @@
 #define WSIZE       4       /* Word and header/footer size (bytes) */ 
 #define DSIZE       8       /* Double word size (bytes) */
 #define MINSIZE     16     /* Min block size: 8 for hdr/ftr, 16 for prev/next*/
-#define CHUNKSIZE  (1<<6)  /* Extend heap by this amount (bytes) */ 
+#define CHUNKSIZE  (1<<8)  /* Extend heap by this amount (bytes) */ 
 #define END         heap_start 
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
@@ -61,13 +93,19 @@
  * <= 2^32. We are interpreting heap_start to be a dummy address */
 
 /* Read and write a word at address p */
-#define GET(p)         (*(unsigned int *)(p))
-#define GETPTR(p)      ((char *)((unsigned long)(*(unsigned int *)(p)) + \
-                                                  (unsigned long)(END)))       
-#define PUT(p, val)    (*(unsigned int *)(p) = (val))
-#define PUTPTR(p, val) (*(unsigned int *)(p) = \
-                         (unsigned int)((unsigned long)(val) - \
-                                        (unsigned long)(END)))
+#define GET(p)          (*(unsigned int *)(p))
+#define GETPPTR(p)      ((char *)((unsigned long)\
+                                (*(unsigned int *)((char *)(p) + WSIZE)) + \
+                                  (unsigned long)(END)))
+#define GETNPTR(p)      ((char *)((unsigned long)(*(unsigned int *)(p)) + \
+                                                   (unsigned long)(END)))         
+#define PUT(p, val)     (*(unsigned int *)(p) = (val))
+#define PUTPPTR(p, val) (*(unsigned int *)((char *)(p) + WSIZE) = \
+                          (unsigned int)((unsigned long)(val) - \
+                                         (unsigned long)(END)))
+#define PUTNPTR(p, val) (*(unsigned int *)(p) = \
+                          (unsigned int)((unsigned long)(val) - \
+                                         (unsigned long)(END)))
 
 /* Read the size and allocated fields from address p */
 #define GET_SIZE(p)  (GET(p) & ~0x7)                   
@@ -90,10 +128,13 @@ static char *bin_end = 0; /* End of prologue block */
 // #endif
 
 /* Function prototypes for internal helper routines */
+// void checkheap(int lineno, unsigned long p);
 static void *extend_heap(size_t words);
 static void place(void *bp, size_t asize);
 static void *find_fit(size_t asize);
 static void *coalesce(void *bp);
+static inline char *getBin(size_t size);
+static inline void splitBlk(void *oldptr, size_t asize, size_t csize);
 
 /*
  * set up the header section
@@ -104,9 +145,9 @@ void prologue_init(void) {
   PUT(heap_listp + (1*WSIZE), PACK(hdrSize, 1)); /* Prologue header */
   for (int i = 2; i < 29; i+=2) {
     // pointer to next(epilogue) block
-    PUTPTR(heap_listp + (i*WSIZE), (unsigned long)END);
+    PUTNPTR(heap_listp + (i*WSIZE), END);
     // pointer to prev block
-    PUTPTR(heap_listp + ((i+1)*WSIZE), (unsigned long)END);
+    PUTPPTR(heap_listp + (i*WSIZE), END);
   }
   PUT(heap_listp + (30*WSIZE), PACK(hdrSize, 1)); /* Prologue footer */
 }
@@ -126,7 +167,7 @@ int mm_init(void) {
   heap_listp += (2*WSIZE);
 
   /* Extend the empty heap with a free block of CHUNKSIZE bytes */
-  if (extend_heap(CHUNKSIZE/WSIZE) == NULL) 
+  if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
     return -1;
   checkheap(__LINE__);
   return 0;
@@ -183,25 +224,41 @@ void free (void *ptr) {
   PUT(HDRP(ptr), PACK(size, 0));
   PUT(FTRP(ptr), PACK(size, 0));
   coalesce(ptr);
-  checkheap(__LINE__);
 }
+
 
 /*
  * realloc - you may want to look at mm-naive.c
  */
 void *realloc(void *oldptr, size_t size) {
-  size_t oldsize;
   void *newptr;
+  size_t asize;
+  size_t oldsize;
 
   /* If size == 0 then this is just free, and we return NULL. */
   if(size == 0) {
-      mm_free(oldptr);
-      return 0;
+    mm_free(oldptr);
+    return 0;
   }
 
   /* If oldptr is NULL, then this is just malloc. */
   if(oldptr == NULL) {
-      return mm_malloc(size);
+    return mm_malloc(size);
+  }
+
+  oldsize = GET_SIZE(HDRP(oldptr));
+
+  // do a similar thing as place
+  if (size <= DSIZE)                                      
+    asize = MINSIZE;                                     
+  else
+    asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
+
+  
+  if (asize <= oldsize) {
+    // this means we can simply split the current block or return old block
+    splitBlk(oldptr, asize, oldsize);
+    return oldptr;
   }
 
   newptr = mm_malloc(size);
@@ -212,7 +269,7 @@ void *realloc(void *oldptr, size_t size) {
   }
 
   /* Copy the old data. */
-  oldsize = GET_SIZE(HDRP(oldptr));
+  // oldsize = GET_SIZE(HDRP(oldptr));
   if(size < oldsize) oldsize = size;
   memcpy(newptr, oldptr, oldsize);
 
@@ -302,27 +359,27 @@ static inline void coalesceNext(void *bp, size_t size) {
 
   // if next is not epilogue, get next and prev
   if (next != NULL && (unsigned long)HDRP(next) != 1) {
-    next_next = GETPTR(next);
-    next_prev = GETPTR(next + WSIZE);
+    next_next = GETNPTR(next);
+    next_prev = GETPPTR(next);
   }
 
   // reset pointers
   if (next_next != END) {
-    PUTPTR(next_next + WSIZE, next_prev);
+    PUTPPTR(next_next, next_prev);
   }
   if (next_prev != END) {
-    PUTPTR(next_prev, next_next);
+    PUTNPTR(next_prev, next_next);
   }
 
   // get first block (we do it here to avoid nasty edge cases)
-  first_blk = GETPTR(bin);
+  first_blk = GETNPTR(bin);
 
   // insert bp into root of list
-  PUTPTR(bp, first_blk);
-  PUTPTR(bp + WSIZE, bin);
-  PUTPTR(bin, bp);
+  PUTNPTR(bp, first_blk);
+  PUTPPTR(bp, bin);
+  PUTNPTR(bin, bp);
   if (first_blk != END) {
-    PUTPTR(first_blk + WSIZE, bp);
+    PUTPPTR(first_blk, bp);
   }
 }
 
@@ -351,13 +408,13 @@ static void *coalesce(void *bp)
     // get bin to put block
     bin = getBin(size);
     // get first block of bin
-    first_blk = GETPTR(bin);
-    PUTPTR(bp, first_blk); // next is first block
-    PUTPTR(bp + WSIZE, bin); // prev is start of list
+    first_blk = GETNPTR(bin);
+    PUTNPTR(bp, first_blk); // next is first block
+    PUTPPTR(bp, bin); // prev is start of list
     if (first_blk != END) {
-      PUTPTR(first_blk + WSIZE, bp); // first_blk prev is bp
+      PUTPPTR(first_blk, bp); // first_blk prev is bp
     }
-    PUTPTR(bin, bp); // heap_listp next is bp
+    PUTNPTR(bin, bp); // heap_listp next is bp
     return bp;
   }
 
@@ -374,29 +431,29 @@ static void *coalesce(void *bp)
     PUT(HDRP(PREV_BLKP(bp)), PACK(size, 0));
     bp = PREV_BLKP(bp);
 
-    first_blk = GETPTR(bin);
+    first_blk = GETNPTR(bin);
     // if bp == first_blk and bp is the proper size, return bp
     if (((unsigned long)first_blk == (unsigned long)bp) && prev_bin == bin) 
       return bp;
 
     // get next and prev for bp, which is the original prev block
-    prev_prev = GETPTR(bp + WSIZE);
-    prev_next = GETPTR(bp);
+    prev_prev = GETPPTR(bp);
+    prev_next = GETNPTR(bp);
 
     // reset pointers
     if (prev_prev != END) {
-      PUTPTR(prev_prev, prev_next);
+      PUTNPTR(prev_prev, prev_next);
     }
     if (prev_next != END) {
-      PUTPTR(prev_next + WSIZE, prev_prev);
+      PUTPPTR(prev_next, prev_prev);
     }
 
     // insert bp into root of bin
-    PUTPTR(bp, first_blk);
-    PUTPTR(bp + WSIZE, bin);
-    PUTPTR(bin, bp);
+    PUTNPTR(bp, first_blk);
+    PUTPPTR(bp, bin);
+    PUTNPTR(bin, bp);
     if (first_blk != END) {
-      PUTPTR(first_blk + WSIZE, bp);
+      PUTPPTR(first_blk, bp);
     }
   }
 
@@ -412,45 +469,77 @@ static void *coalesce(void *bp)
 
     // if next is not epilogue, get next and prev
     if (next != NULL && (unsigned long)HDRP(next) != 1) {
-      next_next = GETPTR(next);
-      next_prev = GETPTR(next + WSIZE);
+      next_next = GETNPTR(next);
+      next_prev = GETPPTR(next);
     }
 
     // reset pointers
     if (next_next != END) {
-      PUTPTR(next_next + WSIZE, next_prev);
+      PUTPPTR(next_next, next_prev);
     }
     if (next_prev != END) {
-      PUTPTR(next_prev, next_next);
+      PUTNPTR(next_prev, next_next);
     }
 
     // get first block (we do it here to avoid nasty edge cases)
-    first_blk = GETPTR(bin);
+    first_blk = GETNPTR(bin);
     if (((unsigned long)first_blk == (unsigned long)bp) && prev_bin == bin) 
       return bp;
 
     // get next and prev for bp, which is the original prev block
-    prev_prev = GETPTR(bp + WSIZE);
-    prev_next = GETPTR(bp);
+    prev_prev = GETPPTR(bp);
+    prev_next = GETNPTR(bp);
 
     // reset pointers
     if (prev_prev != END) {
-      PUTPTR(prev_prev, prev_next);
+      PUTNPTR(prev_prev, prev_next);
     }
     if (prev_next != END) {
-      PUTPTR(prev_next + WSIZE, prev_prev);
+      PUTPPTR(prev_next, prev_prev);
     }
 
     // insert bp into root of list
-    PUTPTR(bp, first_blk);
-    PUTPTR(bp + WSIZE, bin);
-    PUTPTR(bin, bp);
+    PUTNPTR(bp, first_blk);
+    PUTPPTR(bp, bin);
+    PUTNPTR(bin, bp);
     if (first_blk != END) {
-      PUTPTR(first_blk + WSIZE, bp);
+      PUTPPTR(first_blk, bp);
     }
   }
-
+  checkheap(__LINE__);
   return (void*)bp;
+}
+
+/* 
+ * splitBlk - Split a block that is allocated. When realloc is called and
+ *            asize <= csize
+ */
+static inline void splitBlk(void *oldptr, size_t asize, size_t csize) {
+  if (csize - asize < MINSIZE) {
+    // do nothing
+    return;
+  }
+
+  // otherwise, split and add new free block to beginning of bin
+  PUT(HDRP(oldptr), PACK(asize, 1));
+  PUT(FTRP(oldptr), PACK(asize, 1));
+
+  size_t newsize = csize - asize;
+  char *nextptr = NEXT_BLKP(oldptr);
+  // char *bin = getBin(newsize);
+  // char *first_blk = GETNPTR(bin);
+
+  PUT(HDRP(nextptr), PACK(newsize, 0));
+  PUT(FTRP(nextptr), PACK(newsize, 0));
+  coalesce(nextptr);
+
+  // insert new free block into bin
+  // PUTNPTR(nextptr, first_blk);
+  // PUTPPTR(nextptr, bin);
+  // PUTNPTR(bin, nextptr);
+  // if (first_blk != END) {
+  //   PUTPPTR(first_blk, nextptr);
+  // }
 }
 
 /* 
@@ -462,8 +551,8 @@ static void place(void *bp, size_t asize)
   char *bin;
   char *first_blk;
   size_t csize = GET_SIZE(HDRP(bp));
-  char *next = GETPTR(bp);
-  char *prev = GETPTR((char *)bp + WSIZE);
+  char *next = GETNPTR(bp);
+  char *prev = GETPPTR(bp);
 
   if ((csize - asize) >= MINSIZE) {
     // allocate the block
@@ -478,28 +567,29 @@ static void place(void *bp, size_t asize)
 
     // fix pointers of next and prev blocks
     if (prev != END) {
-      PUTPTR(prev, next);
+      PUTNPTR(prev, next);
     }
     if (next != END) {
-      PUTPTR(next + WSIZE, prev);
+      PUTPPTR(next, prev);
     }
-    // insert new free block into root of correct list
-    first_blk = GETPTR(bin);
-    PUTPTR(bp, first_blk);
-    PUTPTR((char*)bp + WSIZE, bin);
-    PUTPTR(bin, bp);
+    // insert new free block into root of correct bin
+    first_blk = GETNPTR(bin);
+    PUTNPTR(bp, first_blk);
+    PUTPPTR(bp, bin);
+    PUTNPTR(bin, bp);
     if (first_blk != END) {
-      PUTPTR(first_blk + WSIZE, bp);
+      PUTPPTR(first_blk, bp);
     }
   }
   else {
     PUT(HDRP(bp), PACK(csize, 1));
     PUT(FTRP(bp), PACK(csize, 1));
+    // fix pointers of bin
     if (prev != END) {
-      PUTPTR(prev, next);
+      PUTNPTR(prev, next);
     }
     if (next != END) {
-      PUTPTR(next + WSIZE, prev);
+      PUTPPTR(next, prev);
     }
   }
 }
@@ -519,7 +609,7 @@ static void *find_fit(size_t asize)
 
   for (; bin != bin_end; bin += DSIZE) {
     best_fit = bin;
-    for (bp = bin; bp != END; bp = (void*)GETPTR(bp)) {
+    for (bp = bin; bp != END; bp = (void*)GETNPTR(bp)) {
       currBlkSize = GET_SIZE(HDRP(bp));
       if (!GET_ALLOC(HDRP(bp)) && (asize == currBlkSize)) {
         // perfect fit
@@ -556,46 +646,45 @@ static int aligned(const void *p) {
   return (size_t)ALIGN(p) == (size_t)p;
 }
 
-int check_prev_next(char *bp, int lineno) {
-  char *next = (char*)GETPTR(bp);
-  char *prev = (char*)GETPTR(bp + WSIZE);
-  int error = 0;
+void check_prev_next(char *bp, int lineno) {
+  char *next = (char*)GETNPTR(bp);
+  char *prev = (char*)GETPPTR(bp);
 
+  // check freeness
   if (next != END && GET_ALLOC(HDRP(next))) {
-    printf("Error, next block (%lx) not free (%d)\n", (unsigned long)next, 
-           lineno);
-    error = 1;
+    fprintf(stderr, "Error, next block (%lx) not free (%d)\n", 
+            (unsigned long)next, lineno);
+    exit(-1);
   }
   if (next != END) {
     if (!in_heap(next)) {
-      printf("Error: next block (%lx) not in heap (%d)\n", (unsigned long)next, 
-           lineno);
-      error = 1;
+      fprintf(stderr, "Error: next block (%lx) not in heap (%d)\n", 
+              (unsigned long)next, lineno);
+      exit(-1);
     }
-    if (GETPTR(next + WSIZE) != bp) {
-      printf("Error: next block (%lx) previous pointer is wrong (%d)\n", 
+    if (GETPPTR(next) != bp) {
+      fprintf(stderr, "Error: next block (%lx) prev pointer is wrong (%d)\n", 
              (unsigned long)next, lineno);
-      error = 1;
+      exit(-1);
     }
   }
   if (prev != END && prev != heap_listp && GET_ALLOC(HDRP(prev))) {
-    printf("Error, previous block (%lx) not free (%d)\n", 
+    fprintf(stderr, "Error, previous block (%lx) not free (%d)\n", 
            (unsigned long)prev, lineno);
-    error = 1;
+    exit(-1);
   }
   if (prev != END && prev != heap_listp) {
     if (!in_heap(prev)) {
-      printf("Error: previous block (%lx) not in heap (%d)\n",
+      fprintf(stderr, "Error: previous block (%lx) not in heap (%d)\n",
              (unsigned long)prev, lineno);
-      error = 1;
+      exit(-1);
     }
-    if (GETPTR(prev) != bp) {
-      printf("Error: previous block (%lx) next pointer is wrong (%d)\n",
+    if (GETNPTR(prev) != bp) {
+      fprintf(stderr, "Error: prev block (%lx) next pointer is wrong (%d)\n",
              (unsigned long)prev, lineno);
-      error = 1;
+      exit(-1);
     }
   }
-  return error;
 }
 
 /*
@@ -608,37 +697,37 @@ void mm_checkheap(int lineno) {
   int free_list_blks = 0;
   char *bp = heap_listp;
   int lastAlloc = 1;
-  int error = 0;
   // iterate through heap and check consistency
   for (; GET_SIZE(HDRP(bp)) > 0; bp = NEXT_BLKP(bp)) {
 
     // check block alignment
     if (!aligned(bp)) {
-      printf("Error: block %lx is not aligned (%d)\n", 
+      fprintf(stderr, "Error: block %lx is not aligned (%d)\n", 
              (unsigned long)bp, lineno);
-      error = 1;
+      exit(-1);
     }
 
     // check in heap
     if (!in_heap(bp)) {
-      printf("Error: block %lx is not aligned (%d)\n", 
+      fprintf(stderr, "Error: block %lx is not aligned (%d)\n", 
              (unsigned long)bp, lineno);
-      error = 1;
+      exit(-1);
     }
 
     // check header/footer consistency
     if (!(GET(HDRP(bp)) == GET(FTRP(bp)))) {
-      printf("Error: block %lx header/footer do not agree (%d)\n", 
+      fprintf(stderr, "Error: block %lx header/footer do not agree (%d)\n", 
              (unsigned long)bp, lineno);
-      error = 1;
+      exit(-1);
     }
 
     // check allocation state
     alloc = GET_ALLOC(HDRP(bp));
     if (!lastAlloc && !alloc) {
-      printf("Error, two consecutive free blocks at addresses %lx, %lx (%d)\n",
+      fprintf(stderr, 
+             "Error, two consecutive free blocks at addresses %lx, %lx (%d)\n",
              (unsigned long)PREV_BLKP(bp), (unsigned long)(bp), lineno);
-      error = 1;
+      exit(-1);
     }
     lastAlloc = alloc;
 
@@ -651,30 +740,29 @@ void mm_checkheap(int lineno) {
   // check free list
   char *currBin;
   for (char *bin = getBin(16); bin != bin_end; bin += DSIZE) {
-    for (bp = bin; bp != END; bp = (char*)GETPTR(bp)) {
+    for (bp = bin; bp != END; bp = (char*)GETNPTR(bp)) {
       // check consistency of prev/next pointers
-      if (check_prev_next(bp, lineno))
-        error = 1;
+      check_prev_next(bp, lineno);
       // check that current block is free
       if (bp != heap_listp && GET_ALLOC(HDRP(bp))) {
-        printf("Error: block not free, but in free list (%lx) (%d)\n",
+        fprintf(stderr, "Error: block not free, but in free list (%lx) (%d)\n",
                (unsigned long)bp, lineno);
-        error = 1;
+        exit(-1);
       }
 
       if (bp != bin) {
         currBin = getBin(GET_SIZE(HDRP(bp)));
         if (currBin != bin) {
-          printf("Error: block (%lx) not in correct bin (%d)\n",
+          fprintf(stderr, "Error: block (%lx) not in correct bin (%d)\n",
                  (unsigned long)bp, lineno);
-          error = 1;
+          exit(-1);
         }
       }
 
       if (!in_heap(bp)) {
-        printf("Error: free block not in heap (%lx) (%d)\n",
+        fprintf(stderr, "Error: free block not in heap (%lx) (%d)\n",
                (unsigned long)bp, lineno);
-        error = 1;
+        exit(-1);
       }
 
       if (bp != bin)
@@ -683,12 +771,12 @@ void mm_checkheap(int lineno) {
   }
 
   if (free_blks != free_list_blks) {
-    printf("Error: free_blks (%d) and free_list_blks (%d) do not match (%d)\n",
-           free_blks, free_list_blks, lineno);
-    error = 1;
+    fprintf(stderr, 
+            "Error: free_blks (%d) and free_list_blks (%d) do not match (%d)\n",
+            free_blks, free_list_blks, lineno);
+    exit(-1);
   }
-  if (!error)
-    printf("ALL CLEAR(%d)\n", lineno);
+  printf("ALL CLEAR(%d)\n", lineno);
 }
 
 
