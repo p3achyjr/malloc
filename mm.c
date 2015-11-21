@@ -81,7 +81,7 @@
 #define WSIZE       4       /* Word and header/footer size (bytes) */ 
 #define DSIZE       8       /* Double word size (bytes) */
 #define MINSIZE     16     /* Min block size: 8 for hdr/ftr, 16 for prev/next*/
-#define CHUNKSIZE  (1<<8)  /* Extend heap by this amount (bytes) */ 
+#define CHUNKSIZE  (1<<6)  /* Extend heap by this amount (bytes) */ 
 #define END         heap_start 
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
@@ -133,6 +133,9 @@ static void *extend_heap(size_t words);
 static void place(void *bp, size_t asize);
 static void *find_fit(size_t asize);
 static void *coalesce(void *bp);
+static inline void coalesceNext(void *bp, size_t size);
+static inline void insertAtRoot(char *bp, char *bin, char *first_blk);
+static inline void join(char *prev, char *next);
 static inline char *getBin(size_t size);
 static inline void splitBlk(void *oldptr, size_t asize, size_t csize);
 
@@ -230,35 +233,67 @@ void free (void *ptr) {
 /*
  * realloc - you may want to look at mm-naive.c
  */
+// void *realloc(void *oldptr, size_t size) {
+//   void *newptr;
+//   size_t asize;
+//   size_t oldsize;
+
+//   /* If size == 0 then this is just free, and we return NULL. */
+//   if(size == 0) {
+//     mm_free(oldptr);
+//     return 0;
+//   }
+
+//   /* If oldptr is NULL, then this is just malloc. */
+//   if(oldptr == NULL) {
+//     return mm_malloc(size);
+//   }
+
+//   oldsize = GET_SIZE(HDRP(oldptr));
+
+//   // do a similar thing as place
+//   if (size <= DSIZE)                                      
+//     asize = MINSIZE;                                     
+//   else
+//     asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
+
+  
+//   if (asize <= oldsize) {
+//     // this means we can simply split the current block or return old block
+//     splitBlk(oldptr, asize, oldsize);
+//     return oldptr;
+//   }
+
+//   newptr = mm_malloc(size);
+
+//   /* If realloc() fails the original block is left untouched  */
+//   if(!newptr) {
+//       return 0;
+//   }
+
+//   /* Copy the old data. */
+//   // oldsize = GET_SIZE(HDRP(oldptr));
+//   if(size < oldsize) oldsize = size;
+//   memcpy(newptr, oldptr, oldsize);
+
+//   /* Free the old block. */
+//   mm_free(oldptr);
+//   checkheap(__LINE__);
+//   return newptr;
+// }
 void *realloc(void *oldptr, size_t size) {
-  void *newptr;
-  size_t asize;
   size_t oldsize;
+  void *newptr;
 
   /* If size == 0 then this is just free, and we return NULL. */
   if(size == 0) {
-    mm_free(oldptr);
-    return 0;
+      mm_free(oldptr);
+      return 0;
   }
 
   /* If oldptr is NULL, then this is just malloc. */
   if(oldptr == NULL) {
-    return mm_malloc(size);
-  }
-
-  oldsize = GET_SIZE(HDRP(oldptr));
-
-  // do a similar thing as place
-  if (size <= DSIZE)                                      
-    asize = MINSIZE;                                     
-  else
-    asize = DSIZE * ((size + (DSIZE) + (DSIZE-1)) / DSIZE);
-
-  
-  if (asize <= oldsize) {
-    // this means we can simply split the current block or return old block
-    splitBlk(oldptr, asize, oldsize);
-    return oldptr;
+      return mm_malloc(size);
   }
 
   newptr = mm_malloc(size);
@@ -269,7 +304,7 @@ void *realloc(void *oldptr, size_t size) {
   }
 
   /* Copy the old data. */
-  // oldsize = GET_SIZE(HDRP(oldptr));
+  oldsize = GET_SIZE(HDRP(oldptr));
   if(size < oldsize) oldsize = size;
   memcpy(newptr, oldptr, oldsize);
 
@@ -343,6 +378,33 @@ static inline char *getBin(size_t size) {
 }
 
 /*
+ * join - joins two nodes
+ * Used for coalescing, to connect the prev and next of a node
+ * that no longer exists
+ */
+static inline void join(char *prev, char *next) {
+  if (next != END) {
+    PUTPPTR(next, prev);
+  }
+
+  if (prev != END) {
+    PUTNPTR(prev, next);
+  }
+}
+
+/*
+ * insertAtRoot - insert node at root of tree
+ */
+static inline void insertAtRoot(char *bp, char *bin, char *first_blk) {
+  PUTNPTR(bp, first_blk);
+  PUTPPTR(bp, bin);
+  PUTNPTR(bin, bp);
+  if (first_blk != END) {
+    PUTPPTR(first_blk, bp);
+  }
+}
+
+/*
  * coalesceNext - coalesce for case 2
  */
 static inline void coalesceNext(void *bp, size_t size) {
@@ -363,30 +425,15 @@ static inline void coalesceNext(void *bp, size_t size) {
     next_prev = GETPPTR(next);
   }
 
-  // reset pointers
-  if (next_next != END) {
-    PUTPPTR(next_next, next_prev);
-  }
-  if (next_prev != END) {
-    PUTNPTR(next_prev, next_next);
-  }
+  join(next_prev, next_next);
 
   // get first block (we do it here to avoid nasty edge cases)
   first_blk = GETNPTR(bin);
-
-  // insert bp into root of list
-  PUTNPTR(bp, first_blk);
-  PUTPPTR(bp, bin);
-  PUTNPTR(bin, bp);
-  if (first_blk != END) {
-    PUTPPTR(first_blk, bp);
-  }
+  insertAtRoot(bp, bin, first_blk);
 }
 
 /*
  * coalesce - Boundary tag coalescing. Return ptr to coalesced block
- * I'm not entirely sure why the modularity of code is so poor, but I went
- * with the 4 case model presented in the lecture slides.
  */
 static void *coalesce(void *bp) 
 {
@@ -409,12 +456,7 @@ static void *coalesce(void *bp)
     bin = getBin(size);
     // get first block of bin
     first_blk = GETNPTR(bin);
-    PUTNPTR(bp, first_blk); // next is first block
-    PUTPPTR(bp, bin); // prev is start of list
-    if (first_blk != END) {
-      PUTPPTR(first_blk, bp); // first_blk prev is bp
-    }
-    PUTNPTR(bin, bp); // heap_listp next is bp
+    insertAtRoot(bp, bin, first_blk);
     return bp;
   }
 
@@ -440,21 +482,8 @@ static void *coalesce(void *bp)
     prev_prev = GETPPTR(bp);
     prev_next = GETNPTR(bp);
 
-    // reset pointers
-    if (prev_prev != END) {
-      PUTNPTR(prev_prev, prev_next);
-    }
-    if (prev_next != END) {
-      PUTPPTR(prev_next, prev_prev);
-    }
-
-    // insert bp into root of bin
-    PUTNPTR(bp, first_blk);
-    PUTPPTR(bp, bin);
-    PUTNPTR(bin, bp);
-    if (first_blk != END) {
-      PUTPPTR(first_blk, bp);
-    }
+    join(prev_prev, prev_next);
+    insertAtRoot(bp, bin, first_blk);
   }
 
   else {                                     /* Case 4 */
@@ -473,13 +502,7 @@ static void *coalesce(void *bp)
       next_prev = GETPPTR(next);
     }
 
-    // reset pointers
-    if (next_next != END) {
-      PUTPPTR(next_next, next_prev);
-    }
-    if (next_prev != END) {
-      PUTNPTR(next_prev, next_next);
-    }
+    join(next_prev, next_next);
 
     // get first block (we do it here to avoid nasty edge cases)
     first_blk = GETNPTR(bin);
@@ -490,21 +513,8 @@ static void *coalesce(void *bp)
     prev_prev = GETPPTR(bp);
     prev_next = GETNPTR(bp);
 
-    // reset pointers
-    if (prev_prev != END) {
-      PUTNPTR(prev_prev, prev_next);
-    }
-    if (prev_next != END) {
-      PUTPPTR(prev_next, prev_prev);
-    }
-
-    // insert bp into root of list
-    PUTNPTR(bp, first_blk);
-    PUTPPTR(bp, bin);
-    PUTNPTR(bin, bp);
-    if (first_blk != END) {
-      PUTPPTR(first_blk, bp);
-    }
+    join(prev_prev, prev_next);
+    insertAtRoot(bp, bin, first_blk);
   }
   checkheap(__LINE__);
   return (void*)bp;
