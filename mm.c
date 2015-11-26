@@ -86,14 +86,15 @@
 /* rounds up to the nearest multiple of ALIGNMENT */
 #define ALIGN(p) (((size_t)(p) + (ALIGNMENT-1)) & ~0x7)
 
-// #define checkheap(lineno) mm_checkheap(lineno)
-#define checkheap(lineno) 
+#define checkheap(lineno) mm_checkheap(lineno)
+// #define checkheap(lineno) 
 
 /* Basic constants and macros */
 #define WSIZE       4       /* Word and header/footer size (bytes) */ 
 #define DSIZE       8       /* Double word size (bytes) */
 #define MINSIZE     16     /* Min block size: 8 for hdr/ftr, 16 for prev/next*/
-#define CHUNKSIZE  (1 << 6)  /* Extend heap by this amount (bytes) */ 
+#define INITSIZE   (4096) /* Initial extension */
+#define CHUNKSIZE  (512)  /* Extend heap by this amount (bytes) */ 
 #define END         heap_start 
 
 #define MAX(x, y) ((x) > (y)? (x) : (y))  
@@ -189,7 +190,7 @@ int mm_init(void) {
   heap_listp += (2*WSIZE);
 
   /* Extend the empty heap with a free block of CHUNKSIZE bytes */
-  if (extend_heap(CHUNKSIZE/WSIZE) == NULL)
+  if (extend_heap(INITSIZE/WSIZE) == NULL)
     return -1;
 
   return 0;
@@ -283,23 +284,24 @@ void *realloc(void *oldptr, size_t size) {
     // this means we can simply split the current block or return old block
     splitBlk(oldptr, asize, oldsize);
     return oldptr;
+  } else {
+
+    newptr = mm_malloc(size);
+
+    /* If realloc() fails the original block is left untouched  */
+    if(!newptr) {
+        return 0;
+    }
+
+    /* Copy the old data. */
+    // oldsize = GET_SIZE(HDRP(oldptr));
+    if(size < oldsize) oldsize = size;
+    memcpy(newptr, oldptr, oldsize);
+
+    /* Free the old block. */
+    mm_free(oldptr);
+    return newptr;
   }
-
-  newptr = mm_malloc(size);
-
-  /* If realloc() fails the original block is left untouched  */
-  if(!newptr) {
-      return 0;
-  }
-
-  /* Copy the old data. */
-  // oldsize = GET_SIZE(HDRP(oldptr));
-  if(size < oldsize) oldsize = size;
-  memcpy(newptr, oldptr, oldsize);
-
-  /* Free the old block. */
-  mm_free(oldptr);
-  return newptr;
 }
 
 /*
@@ -611,24 +613,38 @@ static void *find_fit(size_t asize)
   size_t diff = 0xffffffff; // largest possible difference in heap
   char *bin = getBin(asize);
 
-  for (; bin != bin_end; bin += DSIZE) {
-    best_fit = bin;
-    for (bp = bin; bp != END; bp = (void*)GETNPTR(bp)) {
-      currBlkSize = GET_SIZE(HDRP(bp));
-      if (!GET_ALLOC(HDRP(bp)) && (asize == currBlkSize)) {
-        // perfect fit
-        return bp;
-      } else if (!GET_ALLOC(HDRP(bp)) && (asize < currBlkSize)) {
-        // if this is true, we have found a better fit
-        if (currBlkSize - asize < diff) {
-          diff = currBlkSize - asize;
-          best_fit = bp;
-        }
+  if (asize < 64) {
+    for (; bin != bin_end; bin += DSIZE) {
+      if(GETNPTR(bin) == END) continue;
+      for (bp = bin; bp != END; bp = (void*)GETNPTR(bp)) {
+        currBlkSize = GET_SIZE(HDRP(bp));
+        if (!GET_ALLOC(HDRP(bp)) && (asize <= currBlkSize))
+          return bp;
       }
     }
-    // only case in which best_fit == bin is if list is empty
-    if (best_fit != bin)
-      return best_fit;
+  }
+
+  else {
+    for (; bin != bin_end; bin += DSIZE) {
+      if(GETNPTR(bin) == END) continue;
+      best_fit = bin;
+      for (bp = bin; bp != END; bp = (void*)GETNPTR(bp)) {
+        currBlkSize = GET_SIZE(HDRP(bp));
+        if (!GET_ALLOC(HDRP(bp)) && (asize == currBlkSize)) {
+          // perfect fit
+          return bp;
+        } else if (!GET_ALLOC(HDRP(bp)) && (asize < currBlkSize)) {
+          // if this is true, we have found a better fit
+          if (currBlkSize - asize < diff) {
+            diff = currBlkSize - asize;
+            best_fit = bp;
+          }
+        }
+      }
+      // only case in which best_fit == bin is if list is empty
+      if (best_fit != bin)
+        return best_fit;
+    }
   }
   return NULL; /* No fit */
 }
